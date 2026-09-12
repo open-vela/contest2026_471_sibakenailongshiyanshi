@@ -21,6 +21,19 @@
  ****************************************************************************/
 
 /****************************************************************************
+ * TLI (TFT LCD Interface) framebuffer driver for the GD32H7xx.
+ *
+ * Drives the WKS43WV067 4.3 inch 800x480 RGB565 panel on the contest board:
+ *   - PLL2 generates the 33 MHz pixel clock (see gd32_tli_clock_config)
+ *   - 24-bit RGB data plus DE/VSYNC/HSYNC/PCLK on AF14/AF9/AF13 pins
+ *   - layer 0 scans the frame buffer out of the external SDRAM at
+ *     0xC0000000; 800*480*2 = 768000 bytes does not fit in AXI SRAM
+ *
+ * Exposes the NuttX framebuffer interface (up_fbinitialize / up_fbgetvplane)
+ * plus the gd32_tli_* helpers used by the board bring-up and the GUI.
+ ****************************************************************************/
+
+/****************************************************************************
  * Included Files
  ****************************************************************************/
 
@@ -71,7 +84,7 @@
 #define GD32_TLI_PLL2_N               396
 #define GD32_TLI_PLL2_P               3    /* unused by TLI, keep valid */
 #define GD32_TLI_PLL2_R               3
-#define GD32_TLI_PLL2RDIV             1    /* RCU_PLL2R_DIV4 (1 -> /4) */
+#define GD32_TLI_PLL2RDIV             1    /* RCU_PLL2R_DIV4 (1 -> /4) -> 33MHz, matches example */
 
 /* --- TLI GPIO pin configurations ---
  * Control signals:  DE=PF10, VSYNC=PA7, HSYNC=PC6, PCLK=PG7 (all AF14)
@@ -348,6 +361,32 @@ static int gd32_tli_gpio_config(void)
 }
 
 /****************************************************************************
+ * Name: gd32_spin_delay_ms
+ *
+ * Description:
+ *   Millisecond delay implemented with the DWT cycle counter.  This is
+ *   deliberately NOT up_udelay(): after a warm reset the SysTick-based
+ *   delay can stall (the v61..v63 boot hang happened exactly inside the
+ *   panel-reset 50ms busy-wait), while the cycle counter only depends on
+ *   the CPU core clock (600 MHz) which is always running.
+ *
+ ****************************************************************************/
+
+static void gd32_spin_delay_ms(uint32_t ms)
+{
+  volatile uint32_t *demcr   = (volatile uint32_t *)0xe000edfcu;
+  volatile uint32_t *dwtctrl = (volatile uint32_t *)0xe0001000u;
+  volatile uint32_t *cyccnt  = (volatile uint32_t *)0xe0001004u;
+  uint32_t start;
+
+  *demcr   |= (1u << 24);                 /* DWT TRCENA */
+  *dwtctrl |= 1u;                         /* DWT CYCCNTENA */
+  start = *cyccnt;
+  while ((*cyccnt - start) < ms * (600000000u / 1000u))
+    ;
+}
+
+/****************************************************************************
  * Name: gd32_tli_panel_reset
  *
  * Description:
@@ -357,44 +396,25 @@ static int gd32_tli_gpio_config(void)
 
 static void gd32_tli_panel_reset(void)
 {
-  /* Panel reset, matching the working example (experiment 33) timing:
-   * RST high -> 10ms -> low -> 50ms -> high -> 200ms.  The example does
-   * this AFTER the TLI is enabled (so the pixel clock is already
-   * running).  A short pulse (100us) can leave the panel T-CON in a bad
-   * state that stretches / repeats pixels, so use the example's timing.
-   *
-   * v64 DIAG: read the SysTick current-value register at every step to
-   * prove the CPU/system clock is still ticking through the busy-waits.
-   * If VAL keeps changing the system is alive and only the wait is slow;
-   * if VAL freezes the CPU has faulted/stalled.
+  /* Panel reset with the exact timing of the working example (experiment
+   * 33): RST high -> 10ms -> low -> 50ms -> high -> 200ms.  The example
+   * does this AFTER the TLI is enabled, so the pixel clock is already
+   * running when the panel comes out of reset; skipping this sequence
+   * leaves the panel T-CON uninitialized, which is exactly the
+   * stretched/repeated-pixel symptom we saw in the "skip reset" builds.
+   * Spin delays are used so this can never hang on SysTick.
    */
 
-  volatile uint32_t *syst = (volatile uint32_t *)0xe000e010u; /* SysTick */
-  uint32_t v0, v1;
-
   gd32_gpio_write(GPIO_TLI_RST, true);
-  v0 = syst[2]; /* SYST_VAL */
-  up_udelay(10000);
-  v1 = syst[2];
-  syslog(LOG_INFO, "TLI: rst high val %08x->%08x\n", (unsigned)v0, (unsigned)v1);
-
+  gd32_spin_delay_ms(10);
   gd32_gpio_write(GPIO_TLI_RST, false);
-  v0 = syst[2];
-  up_udelay(50000);
-  v1 = syst[2];
-  syslog(LOG_INFO, "TLI: rst low  val %08x->%08x\n", (unsigned)v0, (unsigned)v1);
-
+  gd32_spin_delay_ms(50);
   gd32_gpio_write(GPIO_TLI_RST, true);
-  v0 = syst[2];
-  up_udelay(200000);
-  v1 = syst[2];
-  syslog(LOG_INFO, "TLI: rst high2 val %08x->%08x\n", (unsigned)v0, (unsigned)v1);
+  gd32_spin_delay_ms(200);
 
-  /* Backlight: power on immediately and report the pin level. */
+  /* Backlight on (BL = PJ9). */
 
   gd32_gpio_write(GPIO_TLI_BL, true);
-  syslog(LOG_INFO, "TLI: backlight on (PJ9 OCTL=%08x)\n",
-         getreg32(GD32_GPIO_OCTL(GD32_GPIOJ_BASE)));
 }
 
 /****************************************************************************
@@ -426,10 +446,6 @@ int gd32_tli_initialize(void)
   uint32_t pwidth  = CONFIG_GD32H7XX_TLI_XRES;
   uint32_t pheight = CONFIG_GD32H7XX_TLI_YRES;
 
-  /* Configure TLI pixel clock and GPIO pins */
-
-  syslog(LOG_INFO, "TLI: init start\n");
-
   /* The 800x480 RGB565 frame buffer lives in the external SDRAM
    * (0xC0000000) because it is larger than the internal AXI SRAM.
    * Bring the SDRAM up first.
@@ -443,11 +459,7 @@ int gd32_tli_initialize(void)
       return -EIO;
     }
 
-  syslog(LOG_INFO, "TLI: pixel clock 33MHz OK\n");
-
   gd32_tli_gpio_config();
-
-  syslog(LOG_INFO, "TLI: gpio configured\n");
 
   /* Configure TLI timing registers
    *
@@ -494,18 +506,22 @@ int gd32_tli_initialize(void)
   putreg32(LAYER_ACF1_PASA | LAYER_ACF2_PASA, GD32_TLI_LXBLEND(layer0));
   putreg32(CONFIG_GD32H7XX_TLI_FB_BASE, GD32_TLI_LXFBADDR(layer0));
 
-  /* Line length (FLL) and stride offset (STDOFF) - GD official TLI
-   * example values that EXACTLY match the 800-pixel frame buffer stride:
-   *   STDOFF = width*2 = 1600 bytes (800 pixels per line)
-   *   FLL    = width*2 + 3 = 1603
-   * STDOFF is the byte count from one line start to the next line start,
-   * so it MUST equal the frame buffer stride (800px = 1600B), otherwise
-   * every line shifts by (STDOFF - 1600)/2 pixels and the image skews.
-   * The previous 1664/1671 (832-pixel stride) never matched the 800-pixel
-   * frame buffer, which is exactly the horizontal skew we saw.
+  /* Line length (FLL) and stride offset (STDOFF).
+   *
+   * These are the exact values written by the GD official TLI example
+   * (experiment 33), which is verified to display correctly on this same
+   * panel:
+   *   STDOFF = (800 + (64 - 800 % 64)) * 2 = 1664
+   *   FLL    = 1664 + 7                    = 1671
+   *
+   * Note this is deliberately NOT the "self-consistent" 1600/1607 pair:
+   * the frame buffer is written with an 800-pixel stride while the TLI
+   * reads it back with a 1664-byte stride, yet the panel renders it
+   * correctly.  The example does exactly this, so replicate it instead of
+   * deriving it from the 800-pixel geometry.  (A previous attempt to
+   * "fix" this to 1600/1607 was reverted - it did not display correctly.)
    */
-
-  putreg32(1603 | (1600 << 16), GD32_TLI_LXFLLEN(layer0));
+  putreg32(1671 | (1664 << 16), GD32_TLI_LXFLLEN(layer0));
   putreg32(pheight, GD32_TLI_LXFTLN(layer0));
 
   /* Disable all TLI interrupts.  The TLI status register shows the
@@ -516,75 +532,60 @@ int gd32_tli_initialize(void)
 
   putreg32(0, GD32_TLI_INTEN);
 
-  /* Reset the panel BEFORE enabling the TLI.  The 50ms/200ms panel
-   * reset busy-waits now run with no pixel clock / TLI DMA traffic, so
-   * they cannot be disturbed by TLI+SDRAM bus contention.  (With the
-   * reset AFTER enable, the boot has sporadically stalled inside the
-   * 50ms busy-wait right after the TLI starts scanning the frame
-   * buffer, which is exactly the kind of contention window we want to
-   * avoid.)
+  /* Enable layer 0, request a reload and enable the TLI FIRST, exactly
+   * like the working example.  The pixel clock has to be running before
+   * the panel reset below: the panel's T-CON latches its configuration
+   * off the incoming pixel clock, so resetting it while the clock is
+   * stopped leaves it uninitialised (stretched / repeated pixels).
+   *
+   * The dither-depth bits (BDB/GDB/RDB) are cleared so CTL reads a clean
+   * 0x00000001 like the example.  Dither is off anyway; this just keeps
+   * the register byte-identical to the verified-good configuration.
    */
 
-  /* Lightweight bring-up: skip the long panel-reset busy-waits that
-   * previously stalled the system.  Drive RST high and turn on the
-   * backlight directly; the panel is expected to show whatever it can
-   * without an explicit reset sequence.
-   */
-
-  gd32_gpio_write(GPIO_TLI_RST, true);
-  gd32_gpio_write(GPIO_TLI_BL, true);
-  syslog(LOG_INFO, "TLI: lightweight enable (panel reset skipped)\n");
-
-  /* Enable layer 0, request reload and enable TLI */
-
+  modifyreg32(GD32_TLI_CTL, 0x00007770, 0);          /* clear BDB/GDB/RDB */
   modifyreg32(GD32_TLI_LXCTL(layer0), 0, TLI_LXCTL_LXEN);
   modifyreg32(GD32_TLI_RL, 0, TLI_RL_L0RE);
   modifyreg32(GD32_TLI_CTL, 0, TLI_CTL_TLIEN);
-  syslog(LOG_INFO, "TLI: TLIEN set\n");
 
-  syslog(LOG_INFO, "TLI: panel reset done, backlight on\n");
+  /* Panel reset (10/50/200ms) with the pixel clock already running, then
+   * backlight on - the working example's order.  The reset busy-waits use
+   * DWT spin delays, see gd32_spin_delay_ms().
+   */
+
+  gd32_tli_panel_reset();
 
   lcdinfo("TLI initialized: %ux%u RGB565, fb=%08x stride=%d\n",
           pwidth, pheight, CONFIG_GD32H7XX_TLI_FB_BASE, GD32_TLI_STRIDE);
-  syslog(LOG_INFO, "TLI: enabled %ux%u RGB565 fb=%08x\n",
-         pwidth, pheight, CONFIG_GD32H7XX_TLI_FB_BASE);
 
-  /* Basic display verification: clear the screen to blue. */
+  /* Clear the frame buffer to blue so the panel shows a known state
+   * until the application draws its first frame.
+   */
 
-  syslog(LOG_INFO, "TLI: clearing fb\n");
   gd32_tli_clear(GD32_RGB565(0x00, 0x00, 0xff));
-  syslog(LOG_INFO, "TLI: fb cleared\n");
-
-  /* Diagnostic: report the actual controller / layer / backlight
-   * register values so we can tell whether the TLI is really running.
-   */
-
-  syslog(LOG_INFO, "TLI: APB3EN=%08x CTL=%08x LXCTL0=%08x RL=%08x INTEN=%08x\n",
-         getreg32(GD32_RCU_APB3EN), getreg32(GD32_TLI_CTL),
-         getreg32(GD32_TLI_LXCTL(GD32_TLI_LAYER0)), getreg32(GD32_TLI_RL),
-         getreg32(GD32_TLI_INTEN));
-  syslog(LOG_INFO, "TLI: BL PJ9 OCTL=%08x (bit9=1 -> backlight high)\n",
-         getreg32(GD32_GPIO_OCTL(GD32_GPIOJ_BASE)));
-
-  /* Post-init scan check: read TLI status and the current pixel
-   * position register several times with a small delay between reads.
-   * If the TLI is really scanning out video, CPPOS keeps changing;
-   * if it stays 0 the TLI never started scanning (clock/signal
-   * problem).  No long delay used here.
-   */
-
-  {
-    int k;
-    for (k = 0; k < 4; k++)
-      {
-        syslog(LOG_INFO, "TLI: scan k=%d CTL=%08x STAT=%08x CPPOS=%08x\n",
-               k, getreg32(GD32_TLI_CTL), getreg32(GD32_TLI_STAT),
-               getreg32(GD32_TLI_CPPOS));
-        up_udelay(1000);
-      }
-  }
 
   return OK;
+}
+
+/****************************************************************************
+ * Name: gd32_tli_enable / gd32_tli_disable
+ *
+ * Description:
+ *   Runtime stop/start of the TLI scan.  Stopping the scan lets the CPU
+ *   write the frame buffer without the TLI reading it at the same time,
+ *   then a reload + re-enable presents the new picture cleanly.
+ *
+ ****************************************************************************/
+
+void gd32_tli_disable(void)
+{
+  modifyreg32(GD32_TLI_CTL, TLI_CTL_TLIEN, 0);
+}
+
+void gd32_tli_enable(void)
+{
+  modifyreg32(GD32_TLI_RL, 0, TLI_RL_L0RE);   /* reload layer config */
+  modifyreg32(GD32_TLI_CTL, 0, TLI_CTL_TLIEN);
 }
 
 /****************************************************************************

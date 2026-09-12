@@ -1,0 +1,33 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config EXAMPLES_GUI
+	tristate "LCD touch GUI demo"
+	default n
+	depends on GD32H7_TLI
+	---help---
+		Enable the 'gui' command: home page with project title and
+		buttons on the 800x480 RGB LCD, with sub-pages for system
+		info, touch test and LED control.  Uses the TLI frame buffer
+		(SDRAM) and the GT911 touch controller.
+
+if EXAMPLES_GUI
+
+config EXAMPLES_GUI_PROGNAME
+	string "Program name"
+	default "gui"
+	---help---
+		This is the name of the program that will be used when the NSH
+		program is installed.
+
+config EXAMPLES_GUI_PRIORITY
+	int "GUI demo task priority"
+	default 100
+
+config EXAMPLES_GUI_STACKSIZE
+	int "GUI demo stack size"
+	default 8192
+
+endif

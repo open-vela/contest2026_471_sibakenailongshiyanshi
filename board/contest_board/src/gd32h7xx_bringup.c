@@ -65,6 +65,7 @@
 #endif
 
 #include "gd32h759imt6.h"
+#include "gd32h7xx_logo.h"
 
 /****************************************************************************
  * Public Functions
@@ -86,6 +87,13 @@ int board_lcd_enable(void)
 {
 #ifdef CONFIG_GD32H7_TLI
   int ret;
+  static bool g_lcd_done;
+
+  /* Idempotent: TLI/SDRAM already brought up by a previous call. */
+  if (g_lcd_done)
+    {
+      return OK;
+    }
 
   syslog(LOG_INFO, "LCD: enabling TLI on demand\n");
 
@@ -96,12 +104,13 @@ int board_lcd_enable(void)
       return ret;
     }
 
-  /* Clear to white and draw a single thick black line at the middle */
+  /* v28: the application (e.g. 'gui') draws its own screen.
+   * Just make sure the TLI scan is running.
+   */
+  gd32_tli_enable();
 
-  gd32_tli_clear(0xffff);
-  gd32_tli_fillrect(0, 236, 800, 8, 0x0000);   /* horizontal black line */
-
-  syslog(LOG_INFO, "LCD: enabled, test pattern drawn\n");
+  g_lcd_done = true;
+  syslog(LOG_INFO, "LCD: enabled, ready\n");
   return OK;
 #else
   return -ENOSYS;

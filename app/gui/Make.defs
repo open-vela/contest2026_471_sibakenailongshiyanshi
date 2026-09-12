@@ -1,0 +1,10 @@
+############################################################################
+# apps/examples/gui/Make.defs
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+############################################################################
+
+ifneq ($(CONFIG_EXAMPLES_GUI),)
+CONFIGURED_APPS += $(APPDIR)/examples/gui
+endif

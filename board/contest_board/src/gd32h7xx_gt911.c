@@ -339,37 +339,6 @@ static int gt911_rd_reg(uint16_t reg, FAR uint8_t *buf, uint8_t len)
  ****************************************************************************/
 
 /****************************************************************************
- * Name: gt911_probe_addrs
- *
- * Description:
- *   Debug helper: send a START + address + ACK check to a set of candidate
- *   I2C addresses to discover which controller is actually present.
- *
- ****************************************************************************/
-
-static void gt911_probe_addrs(void)
-{
-  static const uint8_t addrs[] =
-    {
-      0x28, 0x29,          /* GT911 family (7-bit 0x14) */
-      0x38, 0x39,          /* FT5206 family (7-bit 0x1c) */
-      0x70, 0x71,          /* FT5x06 (8-bit style) */
-      0xba, 0xbb,          /* GT911 (7-bit 0x5d) */
-      0x5d,                /* GT911 7-bit */
-      0x14, 0x15           /* GT911 raw 7-bit */
-    };
-
-  int i;
-
-  for (i = 0; i < sizeof(addrs); i++)
-    {
-      gt911_i2c_start();
-      gt911_i2c_send_byte(addrs[i]);
-      if (gt911_i2c_wait_ack() == OK)
-        {
-          syslog(LOG_INFO, "GT911: I2C addr 0x%02x ACK\n", addrs[i]);
-        }
-
       gt911_i2c_stop();
     }
 }
@@ -470,7 +439,7 @@ int gt911_lower_init(void)
 int gt911_lower_scan(FAR int *x, FAR int *y, FAR int *down)
 {
   uint8_t status;
-  uint8_t buf[5];
+  uint8_t buf[6];
 
   *down = 0;
 
@@ -487,8 +456,8 @@ int gt911_lower_scan(FAR int *x, FAR int *y, FAR int *down)
 
   if (status & 0x80)
     {
-      buf[0] = 0;
-      gt911_wr_reg(GT9XXX_GSTID_REG, buf, 1);
+      uint8_t z = 0;
+      gt911_wr_reg(GT9XXX_GSTID_REG, &z, 1);
     }
 
   if ((status & 0x0f) == 0)
@@ -496,22 +465,17 @@ int gt911_lower_scan(FAR int *x, FAR int *y, FAR int *down)
       return OK;  /* no finger */
     }
 
-  /* Read the first touch point record.  TP record layout:
-   *   byte0 = status (bit7 = valid), byte1 = XH, byte2 = XL,
-   *   byte3 = YH, byte4 = YL
+  /* GT1151Q (PID 1158) touch-point record, per programming guide:
+   *   0x8150 = point x LOW byte, 0x8151 = x HIGH byte,
+   *   0x8152 = point y LOW byte, 0x8153 = y HIGH byte,
+   *   0x8154 = size W, 0x8155 = size H.
+   * Coordinates are little-endian 16-bit values.
    */
 
-  if (gt911_rd_reg(GT9XXX_TP1_REG, buf, 5) != OK)
+  if (gt911_rd_reg(GT9XXX_TP1_REG, buf, 6) != OK)
     {
       return -EIO;
     }
-
-  /* GT1158 touch record layout (confirmed on this panel):
-   *   byte0 = X low,  byte1 = X high,
-   *   byte2 = Y low,  byte3 = Y high,
-   *   byte4 = touch size/pressure
-   * Coordinates are big-endian 16-bit values.
-   */
 
   *x = (buf[1] << 8) | buf[0];
   *y = (buf[3] << 8) | buf[2];
@@ -531,7 +495,7 @@ int gt911_lower_scan(FAR int *x, FAR int *y, FAR int *down)
  ****************************************************************************/
 
 int gt911_lower_rawscan(FAR int *x, FAR int *y, FAR int *down,
-                        FAR uint8_t raw[10])
+                        FAR uint8_t *raw)
 {
   uint8_t status;
 
@@ -545,8 +509,8 @@ int gt911_lower_rawscan(FAR int *x, FAR int *y, FAR int *down,
 
   if (status & 0x80)
     {
-      raw[0] = 0;
-      gt911_wr_reg(GT9XXX_GSTID_REG, raw, 1);
+      uint8_t z = 0;
+      gt911_wr_reg(GT9XXX_GSTID_REG, &z, 1);
     }
 
   if ((status & 0x0f) == 0)
@@ -554,31 +518,22 @@ int gt911_lower_rawscan(FAR int *x, FAR int *y, FAR int *down,
       return OK;  /* no finger */
     }
 
-  /* Read the full touch-point record (10 bytes) so the real coordinate
-   * byte layout can be identified (GT911 family uses 8-byte records
-   * with little-endian 16-bit X/Y).
+  /* Read the first touch-point record (6 bytes):
+   *   0x8150 = X low, 0x8151 = X high, 0x8152 = Y low,
+   *   0x8153 = Y high, 0x8154 = size W, 0x8155 = size H.
    */
 
-  if (gt911_rd_reg(GT9XXX_TP1_REG, raw, 10) != OK)
+  if (gt911_rd_reg(GT9XXX_TP1_REG, raw, 6) != OK)
     {
       return -EIO;
     }
-
-  /* GT1158 touch record layout (confirmed by byte tracing):
-   *   byte0 = X low,  byte1 = X high,
-   *   byte2 = Y low,  byte3 = Y high,
-   *   byte4 = touch size/pressure
-   * Coordinates are big-endian 16-bit values.
-   */
 
   *x = (raw[1] << 8) | raw[0];
   *y = (raw[3] << 8) | raw[2];
   *down = 1;
 
   return OK;
-}
-
-/****************************************************************************
+}/****************************************************************************
  * Name: gt911_lower_draw
  *
  * Description:
