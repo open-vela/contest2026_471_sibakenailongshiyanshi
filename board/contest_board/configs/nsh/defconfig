@@ -1,3 +1,10 @@
 # Minimal placeholder defconfig for contest2026_000_board.
 # Not intended to boot real hardware; sample only.
 CONFIG_ARCH_BOARD_CONTEST2026_000_BOARD=y
+
+# --- 应用使能（GUI / 触摸 / LCD / LED / FFT） ---
+CONFIG_EXAMPLES_LEDS=y
+CONFIG_GD32H7_TLI=y
+CONFIG_EXAMPLES_GT911=y
+CONFIG_EXAMPLES_LCD=y
+CONFIG_EXAMPLES_GUI=y
