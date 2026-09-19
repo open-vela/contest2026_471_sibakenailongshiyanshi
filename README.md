@@ -43,21 +43,69 @@
 - `firmware/` — 已交付固件（bin），版本说明见下
 - `logs/` — AI Coding 日志（持续更新）
 
-## 四、运行方式
+## 四、编译与运行（已验证通过）
 
-1. 按 README 顶部流程 `repo init` / `repo sync` 拉取 openvela 全量源码与本仓。
-2. 将本仓代码应用到对应路径（均为增量改动）：
-   - `board/contest_board/src/*` → `vendor/gigadevice/boards/gd32h7/gd32h759imt6/src/`
-   - `board/contest_board/nuttx/arch/arm/src/gd32h7xx/*` → `nuttx/arch/arm/src/gd32h7xx/`
-   - `board/contest_board/configs/nsh/defconfig` → `vendor/gigadevice/boards/gd32h7/gd32h759imt6/configs/nsh/defconfig`
-   - `app/gt911_demo/*` → `apps/examples/gt911/`；`app/lcd_demo/*` → `apps/examples/lcd/`；`app/leds_demo/leds_main.c` → `apps/examples/leds/`；`app/gui/*` → `apps/examples/gui/`
-3. 启用相关配置：`CONFIG_GD32H759IMT6_GT911`、`CONFIG_EXAMPLES_GT911`、`CONFIG_EXAMPLES_LCD`、`CONFIG_EXAMPLES_GUI`、`CONFIG_GD32H7_TLI`。
-4. 编译：`./build.sh vendor/gigadevice/boards/gd32h7/gd32h759imt6/configs/nsh/defconfig -j8`。
-5. 串口 115200 进入 NSH：
-   - `leds` — LED 闪烁（无串口输出）
-   - `gt911` — 触摸检测
-   - `lcd` — 按需开启 LCD 并画测试图案
-   - `gui` — 启动可视化系统（触摸校准后进入主界面；测量控制页自动运行 ADC 采集 + FFT 频谱，可控制 LED 与 PWM 亮度）
+### 1. 环境准备
+
+- Ubuntu Linux（已验证 22.04）
+- 交叉工具链：arm-none-eabi-gcc 13.4.0（openvela prebuilts 自带，路径：`prebuilts/gcc/linux-x86_64/arm-none-eabi/bin`）
+- 依赖：`git` `repo` `build-essential` `libncurses5-dev`
+
+### 2. 拉取源码
+
+```bash
+repo init -u <openvela 官方 manifest> -b master
+repo sync
+```
+
+本仓（contest2026_471_sibakenailongshiyanshi）会作为增量补丁仓被同步下来。
+
+### 3. 应用增量改动
+
+将本仓文件按以下映射复制到 openvela 源码树对应位置：
+
+| 本仓路径 | 目标路径 |
+|---|---|
+| `board/contest_board/src/*` | `vendor/gigadevice/boards/gd32h7/gd32h759imt6/src/` |
+| `board/contest_board/nuttx/arch/arm/src/gd32h7xx/*` | `nuttx/arch/arm/src/gd32h7xx/` |
+| `board/contest_board/configs/nsh/defconfig` | `vendor/gigadevice/boards/gd32h7/gd32h759imt6/configs/nsh/defconfig` |
+| `app/gui/*` | `apps/examples/gui/` |
+| `app/gt911_demo/*` | `apps/examples/gt911/` |
+| `app/lcd_demo/*` | `apps/examples/lcd/` |
+| `app/leds_demo/leds_main.c` | `apps/examples/leds/` |
+
+> defconfig 已包含全部必要配置（`CONFIG_EXAMPLES_GUI`、`CONFIG_GD32H7_TLI`、`CONFIG_GD32H759IMT6_GT911`、`CONFIG_EXAMPLES_GT911`、`CONFIG_EXAMPLES_LCD`、`CONFIG_EXAMPLES_LEDS`），无需手动 menuconfig。
+
+### 4. 编译
+
+```bash
+# 设置工具链 PATH
+export PATH=<openvela根>/prebuilts/gcc/linux-x86_64/arm-none-eabi/bin:$PATH
+
+# 配置板卡
+cd nuttx
+./tools/configure.sh ../vendor/gigadevice/boards/gd32h7/gd32h759imt6/configs/nsh
+
+# 编译
+make -j4
+```
+
+产物：`nuttx/nuttx.bin`（约 591KB，flash 占用 28.2%）。
+
+> 如遇 kconfig 工具报错，可在 openvela 根目录用 `./build.sh ../vendor/gigadevice/boards/gd32h7/gd32h759imt6/configs/nsh -j4`（会自动编译 kconfig-frontends）。
+
+### 5. 烧录
+
+用 GD32 All In One Programmer，串口 ISP 烧录 `nuttx.bin` 到 `0x08000000`（板卡需 BOOT0=1 进入 ISP 模式）。
+
+### 6. 运行
+
+串口 115200 进入 NSH：
+
+- `gui` — 启动可视化系统（触摸校准后进入主界面：触摸跟随 / 手写识别 / 测量控制 / 系统信息）
+- `leds` — LED 闪烁
+- `gt911` — 触摸检测
+- `lcd` — 按需开启 LCD
 
 ## 五、固件版本说明（firmware/）
 
